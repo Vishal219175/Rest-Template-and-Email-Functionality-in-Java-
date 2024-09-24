@@ -1,0 +1,319 @@
+1) import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
+import io.swagger.v3.oas.annotations.media.Content;
+import io.swagger.v3.oas.annotations.media.Schema;
+import io.swagger.v3.oas.annotations.responses.ApiResponse;
+import io.swagger.v3.oas.annotations.responses.ApiResponses;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+import org.springframework.web.multipart.MultipartFile;
+import za.co.investec.dsbulk.service.PdfEncryptionService;
+import java.io.IOException;
+
+@RestController
+@RequestMapping("/api/pdf")
+public class PdfEncryptionController {
+
+    private final PdfEncryptionService pdfEncryptionService;
+
+    public PdfEncryptionController(PdfEncryptionService pdfEncryptionService) {
+        this.pdfEncryptionService = pdfEncryptionService;
+    }
+
+    @Operation(summary = "Upload the pdf document", description = "Returns the encrypted pdf document")
+    @ApiResponses(value = {
+            @ApiResponse(responseCode = "200", description = "Successfully retrieved the encrypted pdf"),
+            @ApiResponse(responseCode = "404", description = "The account-no was not found")
+    })
+    @PostMapping(value = "/upload", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public ResponseEntity<byte[]> uploadPdf(
+            @RequestPart("file")
+            @Parameter(description = "File to be uploaded", required = true, content = @Content(mediaType = "application/pdf", schema = @Schema(type = "string", format = "binary")))
+            MultipartFile file,
+            @RequestParam String accountNumber) throws IOException {
+        if (!file.isEmpty()) {
+            byte[] pdfContent = file.getBytes();
+            byte[] encryptedPdfContent = pdfEncryptionService.encryptPdf(pdfContent, accountNumber);
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.APPLICATION_PDF);
+            headers.setContentDispositionFormData("attachment", accountNumber + "-secured.pdf");
+            return new ResponseEntity<>(encryptedPdfContent, headers, HttpStatus.OK);
+        } else {
+            return new ResponseEntity<>(HttpStatus.BAD_REQUEST);
+        }
+    }
+}
+
+2) 
+
+import org.springframework.stereotype.Service;
+import za.co.investec.dsbulk.db.EventsRepository;
+import za.co.investec.dsbulk.utils.Encryption;
+
+@Service
+public class PdfEncryptionService {
+
+    private String ENCRYPTED_STRING = "Encrypted";
+
+    private final EventsRepository eventsRepository;
+
+    private final Encryption encryption;
+
+    public PdfEncryptionService(EventsRepository eventsRepository, Encryption encryption) {
+        this.eventsRepository = eventsRepository;
+        this.encryption = encryption;
+    }
+
+    public byte[] encryptPdf(byte[] pdfContent, String accountNumber) {
+        String idNumber = eventsRepository.retrieveIDNumber(accountNumber);
+        String dateOfBirth = null;
+        if (idNumber == null) {
+            dateOfBirth = eventsRepository.retrieveDOB(accountNumber);
+        }
+        String userPassword = idNumber != null ? idNumber : dateOfBirth;
+        return encryptPdfContent(pdfContent, userPassword);
+    }
+
+    private byte[] encryptPdfContent(byte[] pdfContent, String userPassword) {
+        return encryption.protectDocument(pdfContent, ENCRYPTED_STRING, userPassword);
+    }
+}
+
+3) 
+
+import jakarta.persistence.EntityManager;
+import jakarta.persistence.NoResultException;
+import jakarta.persistence.PersistenceContext;
+import org.springframework.stereotype.Repository;
+
+@Repository
+public class EventsRepository {
+
+    @PersistenceContext
+    private EntityManager entityManager;
+
+    public String retrieveIDNumber(String accountNumber) {
+        final String query = "SELECT IDNUMBER FROM PROJECTION_EVENTS WHERE ACCOUNTNUMBER = ?";
+        try {
+            return (String) entityManager.createNativeQuery(query)
+                    .setParameter(1, accountNumber)
+                    .getSingleResult();
+        } catch (NoResultException e) {
+            return null;
+        }
+    }
+
+    public String retrieveDOB(String accountNumber) {
+        final String query = "SELECT DATEOFBIRTH FROM PROJECTION_EVENTS WHERE ACCOUNTNUMBER = ?";
+        try {
+            return (String) entityManager.createNativeQuery(query)
+                    .setParameter(1, accountNumber)
+                    .getSingleResult();
+        } catch (NoResultException e) {
+            return null;
+        }
+    }
+}
+
+4) 
+import org.apache.pdfbox.pdmodel.PDDocument;
+import org.apache.pdfbox.pdmodel.encryption.AccessPermission;
+import org.apache.pdfbox.pdmodel.encryption.StandardProtectionPolicy;
+import org.springframework.stereotype.Component;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+
+@Component
+public class Encryption {
+
+    public byte[] protectDocument(byte[] pdfContent, String masterPassword, String userPassword) {
+        try (PDDocument document = PDDocument.load(pdfContent)) {
+            AccessPermission accessPermission = new AccessPermission();
+            accessPermission.setCanModify(false);
+            accessPermission.setCanExtractContent(false);
+
+            StandardProtectionPolicy protectionPolicy = new StandardProtectionPolicy(masterPassword, userPassword, accessPermission);
+            protectionPolicy.setEncryptionKeyLength(128);
+            protectionPolicy.setPermissions(accessPermission);
+
+            document.protect(protectionPolicy);
+
+            ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
+            document.save(outputStream);
+            return outputStream.toByteArray();
+        } catch (IOException e) {
+            e.printStackTrace();
+            throw new RuntimeException("Error protecting PDF document", e);
+        }
+    }
+}
+
+5) pom.xml 
+
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+		 xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+	<modelVersion>4.0.0</modelVersion>
+	<parent>
+		<groupId>org.springframework.boot</groupId>
+		<artifactId>spring-boot-starter-parent</artifactId>
+		<version>3.2.5</version>
+		<relativePath/> <!-- lookup parent from repository -->
+	</parent>
+	<groupId>za.co.investec</groupId>
+	<artifactId>dsbulk-encryption</artifactId>
+	<version>0.0.1-SNAPSHOT</version>
+	<name>ccnc-dsbulk-encryption</name>
+	<description>Demo project for Spring Boot</description>
+
+	<repositories>
+		<repository>
+			<id>nexus-public-repository-group</id>
+			<name>Nexus Public Maven Repository Group</name>
+			<url>http://pvbjhbvlvcs4.investec.corp:8081/nexus/content/groups/public/</url>
+			<layout>default</layout>
+			<releases>
+				<enabled>true</enabled>
+				<updatePolicy>never</updatePolicy>
+			</releases>
+			<snapshots>
+				<enabled>true</enabled>
+				<updatePolicy>never</updatePolicy>
+			</snapshots>
+		</repository>
+	</repositories>
+	<distributionManagement>
+		<repository>
+			<id>nexus-release</id>
+			<name>Investec Internal Nexus Release Repository</name>
+			<url>dav:http://pvbjhbvlvcs4.investec.corp:8081/nexus/content/repositories/releases</url>
+			<uniqueVersion>false</uniqueVersion>
+		</repository>
+		<snapshotRepository>
+			<id>nexus-snapshot</id>
+			<name>Investec Internal Nexus Snapshot Repository</name>
+			<url>dav:http://pvbjhbvlvcs4.investec.corp:8081/nexus/content/repositories/snapshots</url>
+			<uniqueVersion>false</uniqueVersion>
+		</snapshotRepository>
+	</distributionManagement>
+
+	<properties>
+		<java.version>17</java.version>
+	</properties>
+	<dependencies>
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-webflux</artifactId>
+			<exclusions>
+				<exclusion>
+					<groupId>org.springframework</groupId>
+					<artifactId>spring-web</artifactId>
+				</exclusion>
+			</exclusions>
+		</dependency>
+		<dependency>
+			<groupId>org.springframework</groupId>
+			<artifactId>spring-web</artifactId>
+			<version>6.1.6</version>
+		</dependency>
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-web</artifactId>
+			<exclusions>
+				<exclusion>
+					<groupId>org.apache.tomcat.embed</groupId>
+					<artifactId>tomcat-embed-core</artifactId>
+				</exclusion>
+			</exclusions>
+		</dependency>
+		<dependency>
+			<groupId>org.apache.tomcat.embed</groupId>
+			<artifactId>tomcat-embed-core</artifactId>
+			<version>10.1.25</version>
+		</dependency>
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-actuator</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-data-jpa</artifactId>
+			<exclusions>
+				<exclusion>
+					<groupId>ch.qos.logback</groupId>
+					<artifactId>logback-classic</artifactId>
+				</exclusion>
+				<exclusion>
+					<groupId>ch.qos.logback</groupId>
+					<artifactId>logback-core</artifactId>
+				</exclusion>
+			</exclusions>
+		</dependency>
+		<dependency>
+			<groupId>org.apache.pdfbox</groupId>
+			<artifactId>pdfbox</artifactId>
+			<version>2.0.17</version>
+		</dependency>
+		<dependency>
+			<groupId>org.apache.pdfbox</groupId>
+			<artifactId>pdfbox-tools</artifactId>
+			<version>2.0.17</version>
+		</dependency>
+		<dependency>
+			<groupId>com.oracle</groupId>
+			<artifactId>ojdbc8</artifactId>
+			<version>12.2.0.1</version>
+		</dependency>
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-test</artifactId>
+			<scope>test</scope>
+		</dependency>
+		<dependency>
+			<groupId>org.springdoc</groupId>
+			<artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+			<version>2.3.0</version>
+		</dependency>
+	</dependencies>
+
+	<build>
+		<plugins>
+			<plugin>
+				<groupId>org.springframework.boot</groupId>
+				<artifactId>spring-boot-maven-plugin</artifactId>
+			</plugin>
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-compiler-plugin</artifactId>
+				<version>3.8.1</version>
+				<configuration>
+					<source>17</source>
+					<target>17</target>
+				</configuration>
+			</plugin>
+		</plugins>
+	</build>
+</project>
+
+6) application.yml 
+
+spring:
+  datasource:
+    driver-class-name: oracle.jdbc.OracleDriver
+    url: 
+    username: 
+    password: 
+
+springdoc:
+  api-docs:
+    path: /api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+
+server:
+  port: 8080
+
+

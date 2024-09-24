@@ -1,0 +1,228 @@
+1)
+import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.mail.MessagingException;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.web.bind.annotation.*;
+import za.co.investec.dsbulk.model.EmailRequest;
+import za.co.investec.dsbulk.service.EmailService;
+
+@RestController
+@RequestMapping("/email")
+public class EmailController {
+
+    private final EmailService emailService;
+    private final ObjectMapper objectMapper;
+
+    @Autowired
+    public EmailController(EmailService emailService, ObjectMapper objectMapper) {
+        this.emailService = emailService;
+        this.objectMapper = objectMapper;
+    }
+
+    @PostMapping("/send")
+    public void sendEmail(@RequestBody final String emailRequestJson) throws MessagingException {
+        try {
+            EmailRequest emailRequest = objectMapper.readValue(emailRequestJson, EmailRequest.class);
+            emailService.sendBatchEmailsWithAttachment(emailRequest);
+        } catch (Exception e) {
+            throw new MessagingException("Failed to parse email request", e);
+        }
+    }
+}
+
+2)
+
+import jakarta.mail.MessagingException;
+import jakarta.mail.internet.MimeMessage;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.core.io.ByteArrayResource;
+import org.springframework.mail.javamail.JavaMailSenderImpl;
+import org.springframework.mail.javamail.MimeMessageHelper;
+import org.springframework.stereotype.Service;
+import za.co.investec.dsbulk.model.EmailRequest;
+
+@Service
+public class EmailService {
+
+    private final JavaMailSenderImpl mailSender;
+
+    @Value("${smtp.host}")
+    private String host;
+
+    public EmailService() {
+        mailSender = new JavaMailSenderImpl();
+        mailSender.setHost(host);
+        mailSender.setPort(25);
+    }
+
+    public void sendBatchEmailsWithAttachment(final EmailRequest emailRequest) throws MessagingException {
+
+        MimeMessage message = mailSender.createMimeMessage();
+        MimeMessageHelper helper = new MimeMessageHelper(message, true);
+
+        helper.setSubject(emailRequest.getSubject());
+        helper.setFrom(emailRequest.getFrom());
+        helper.setText(emailRequest.getHtmlBody(), true);
+
+        for (String recipient : emailRequest.getRecipients()) {
+            helper.setTo(recipient);
+            helper.addAttachment(emailRequest.getAttachmentName(), new ByteArrayResource(emailRequest.getPdfData()));
+            mailSender.send(message);
+        }
+    }
+}
+
+3) 
+
+import java.util.List;
+
+public class EmailRequest {
+
+    private final String from;
+
+    private final List<String> recipients;
+
+    private final String subject;
+
+    private final String htmlBody;
+
+    private final byte[] pdfData;
+
+    private final String attachmentName;
+
+
+    public EmailRequest(String from, List<String> recipients, String subject,
+                        String htmlBody, byte[] pdfData, String attachmentName) {
+        this.from = from;
+        this.recipients = recipients;
+        this.subject = subject;
+        this.htmlBody = htmlBody;
+        this.pdfData = pdfData;
+        this.attachmentName = attachmentName;
+    }
+
+    public String getFrom() {
+        return from;
+    }
+
+    public List<String> getRecipients() {
+        return recipients;
+    }
+
+    public String getSubject() {
+        return subject;
+    }
+
+    public String getHtmlBody() {
+        return htmlBody;
+    }
+
+    public byte[] getPdfData() {
+        return pdfData;
+    }
+
+    public String getAttachmentName() {
+        return attachmentName;
+    }
+}
+
+
+4) pom.xml 
+
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+	<modelVersion>4.0.0</modelVersion>
+	<parent>
+		<groupId>org.springframework.boot</groupId>
+		<artifactId>spring-boot-starter-parent</artifactId>
+		<version>3.3.1</version>
+		<relativePath/> <!-- lookup parent from repository -->
+	</parent>
+	<groupId>za.co.investec</groupId>
+	<artifactId>dsbulk-email-api</artifactId>
+	<version>0.0.1-SNAPSHOT</version>
+	<name>ccnc-dsbulk-email-api</name>
+	<description>Demo project for Spring Boot</description>
+
+	<repositories>
+		<repository>
+			<id>nexus-public-repository-group</id>
+			<name>Nexus Public Maven Repository Group</name>
+			<url>http://pvbjhbvlvcs4.investec.corp:8081/nexus/content/groups/public/</url>
+			<layout>default</layout>
+			<releases>
+				<enabled>true</enabled>
+				<updatePolicy>never</updatePolicy>
+			</releases>
+			<snapshots>
+				<enabled>true</enabled>
+				<updatePolicy>never</updatePolicy>
+			</snapshots>
+		</repository>
+	</repositories>
+	<distributionManagement>
+		<repository>
+			<id>nexus-release</id>
+			<name>Investec Internal Nexus Release Repository</name>
+			<url>dav:http://pvbjhbvlvcs4.investec.corp:8081/nexus/content/repositories/releases</url>
+			<uniqueVersion>false</uniqueVersion>
+		</repository>
+		<snapshotRepository>
+			<id>nexus-snapshot</id>
+			<name>Investec Internal Nexus Snapshot Repository</name>
+			<url>dav:http://pvbjhbvlvcs4.investec.corp:8081/nexus/content/repositories/snapshots</url>
+			<uniqueVersion>false</uniqueVersion>
+		</snapshotRepository>
+	</distributionManagement>
+
+	<properties>
+		<java.version>17</java.version>
+	</properties>
+
+	<dependencies>
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-webflux</artifactId>
+			<exclusions>
+				<exclusion>
+					<groupId>org.springframework</groupId>
+					<artifactId>spring-web</artifactId>
+				</exclusion>
+			</exclusions>
+		</dependency>
+		<dependency>
+			<groupId>org.springframework</groupId>
+			<artifactId>spring-web</artifactId>
+			<version>6.1.6</version>
+		</dependency>
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-mail</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-test</artifactId>
+			<scope>test</scope>
+		</dependency>
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-actuator</artifactId>
+		</dependency>
+	</dependencies>
+
+	<build>
+		<plugins>
+			<plugin>
+				<groupId>org.springframework.boot</groupId>
+				<artifactId>spring-boot-maven-plugin</artifactId>
+			</plugin>
+		</plugins>
+	</build>
+
+</project>
+
+5) application.yml 
+
+smtp:
+  host: 

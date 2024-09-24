@@ -1,0 +1,211 @@
+1) Add the BatchService class 
+
+@Service
+@Slf4j
+@RequiredArgsConstructor
+public class BatchService {
+
+    private final DSbulkRepository dSbulkRepository;
+
+    private final EncryptionClient encryptionClient;
+
+    private final EmailClient emailClient;
+
+    public void sendEmailForBatchRecords() {
+        log.info("Running process to send bulk emails...");
+
+        List<BatchRecordDetail> batchRecordDetails = dSbulkRepository.getBatchRecordDetails();
+        List<Long> updatedRecordIds = new ArrayList<>();
+
+        batchRecordDetails.parallelStream().forEach(batchRecordDetail -> {
+            try {
+                String[] destination = batchRecordDetail.getDestination().split(";");
+                String attachmentName = batchRecordDetail.getReference() + "_" + batchRecordDetail.getDocumentdate().toString() + ".pdf";
+                if (destination.length >= 1) {
+                    List<String> validEmails = Arrays.stream(destination)
+                            .map(String::trim)
+                            .filter(this::isValidEmail)
+                            .collect(Collectors.toList());
+
+                    if (!validEmails.isEmpty()) {
+                        byte[] encryptedContent = encryptionClient.encryptContent(batchRecordDetail.getDocument(), batchRecordDetail.getReference());
+                        emailClient.sendEmail(
+                                "noreply@investec.com",
+                                validEmails,
+                                "Encrypted PDF",
+                                new String(batchRecordDetail.getEmailbody(), StandardCharsets.UTF_8),
+                                encryptedContent,
+                                attachmentName
+                        );
+                        updatedRecordIds.add(batchRecordDetail.getId());
+                    } else {
+                        log.error("Batch record has no valid destination email addresses :: " + Arrays.toString(destination));
+                    }
+                } else {
+                    log.error("Batch record has an invalid destination :: " + Arrays.toString(destination));
+                }
+            } catch (Exception e) {
+                log.error("Error processing batch record with ID: " + batchRecordDetail.getId(), e);
+            }
+        });
+        dSbulkRepository.updateBatchRecordStatuses(updatedRecordIds, "SENT_TO_CHANNEL");
+    }
+
+    private boolean isValidEmail(String email) {
+        try {
+            new InternetAddress(email, true);
+            return true;
+        } catch (AddressException e) {
+            log.error("Invalid email address: " + email, e);
+            return false;
+        }
+    }
+}
+
+
+2) Add a Scheduler
+
+@Component
+@Slf4j
+@RequiredArgsConstructor
+public class BulkEmailJob {
+
+    private final BatchService batchService;
+
+    @Scheduled(fixedDelay = 2000)
+    public void runSchedule() {
+        batchService.sendEmailForBatchRecords();
+    }
+
+}
+
+3) Add Encryption Client using rest template and calling the encryption microservice 
+
+import lombok.RequiredArgsConstructor;
+import org.springframework.core.io.ByteArrayResource;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.stereotype.Service;
+import org.springframework.util.LinkedMultiValueMap;
+import org.springframework.util.MultiValueMap;
+import org.springframework.web.client.RestTemplate;
+import org.springframework.web.util.UriComponentsBuilder;
+import org.springframework.beans.factory.annotation.Value;
+import lombok.extern.slf4j.Slf4j;
+
+@Service
+@RequiredArgsConstructor
+@Slf4j
+public class EncryptionClient {
+
+    private final RestTemplate restTemplate;
+
+    @Value("${ds-bulk.batch.encryptionBaseUrl}")
+    private String encryptionBaseUrl;
+
+    public byte[] encryptContent(byte[] content, String accountNumber) {
+        String url = encryptionBaseUrl + "/api/pdf/upload";
+
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.MULTIPART_FORM_DATA);
+
+        MultiValueMap<String, Object> body = new LinkedMultiValueMap<>();
+        body.add("file", new ByteArrayResource(content) {
+            @Override
+            public String getFilename() {
+                return "file.pdf";
+            }
+        });
+        body.add("accountNumber", accountNumber);
+
+        HttpEntity<MultiValueMap<String, Object>> requestEntity = new HttpEntity<>(body, headers);
+
+        UriComponentsBuilder builder = UriComponentsBuilder.fromHttpUrl(url);
+
+        try {
+            ResponseEntity<byte[]> response = restTemplate.exchange(
+                    builder.toUriString(),
+                    HttpMethod.POST,
+                    requestEntity,
+                    byte[].class
+            );
+
+            if (response.getStatusCode().is2xxSuccessful()) {
+                return response.getBody();
+            } else {
+                log.error("Failed to encrypt content. Status code: {}", response.getStatusCode());
+                throw new RuntimeException("Failed to encrypt content");
+            }
+        } catch (Exception e) {
+            log.error("Exception occurred while encrypting content: ", e);
+            throw new RuntimeException("Failed to encrypt content", e);
+        }
+    }
+}
+
+4) Add the Email Client using rest template and calling the email microservice 
+
+import lombok.RequiredArgsConstructor;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.stereotype.Service;
+import org.springframework.web.client.RestTemplate;
+import org.springframework.web.util.UriComponentsBuilder;
+import za.co.investec.dsbulk.model.EmailRequest;
+import java.util.List;
+import org.springframework.beans.factory.annotation.Value;
+
+@Service
+@RequiredArgsConstructor
+public class EmailClient {
+
+    private final RestTemplate restTemplate;
+    @Value("${ds-bulk.batch.emailBaseUrl}")
+    private String emailBaseUrl;
+
+    public void sendEmail(String from, List<String> recipients, String subject, String htmlBody, byte[] pdfData, String attachmentName) {
+        String url = emailBaseUrl + "/email/send";
+
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+
+        EmailRequest emailRequest = new EmailRequest(from, recipients, subject, htmlBody, pdfData, attachmentName);
+        HttpEntity<EmailRequest> requestEntity = new HttpEntity<>(emailRequest, headers);
+
+        UriComponentsBuilder builder = UriComponentsBuilder.fromHttpUrl(url);
+
+        ResponseEntity<Void> response = restTemplate.exchange(
+                builder.toUriString(),
+                HttpMethod.POST,
+                requestEntity,
+                Void.class
+        );
+
+        if (!response.getStatusCode().is2xxSuccessful()) {
+            throw new RuntimeException("Failed to send email");
+        }
+    }
+}
+
+5) Add AppConfig class :- 
+
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.web.client.RestTemplate;
+
+@Configuration
+public class AppConfig {
+
+    @Bean
+    public RestTemplate restTemplate() {
+        return new RestTemplate();
+    }
+}
+
+6) Encryption and email is added in next files seperately 
